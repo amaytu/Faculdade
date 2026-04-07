@@ -29,9 +29,21 @@ pts = np.array([[200, 200], [600, 200], [700, 400], [500, 600], [300, 600], [150
 pts = pts.reshape((-1, 1, 2))
 cv2.polylines(img_gray, [pts], isClosed=True, color=50, thickness=20)
 
+# Inserindo ruídos para justificar e demonstrar os algoritmos de limpeza:
+salt_pepper = np.random.rand(800, 800)
+# 1. Ruído "Salt" na pista (pontos claros criam buracos que a dilatação/erosão vão fechar)
+img_gray[(salt_pepper > 0.97) & (img_gray < 100)] = 200
+# 2. Ruído "Pepper" e falsas feições no fundo (o remove_small_objects vai limpar)
+img_gray[salt_pepper < 0.03] = 40
+for _ in range(80):
+    ix = np.random.randint(0, 800)
+    iy = np.random.randint(0, 800)
+    r = np.random.randint(1, 4)
+    cv2.circle(img_gray, (ix, iy), r, 40, -1)
+
 img_rgb = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
 
-show_img("Imagem Original", img_gray)
+show_img("Imagem Original com Ruídos", img_gray)
 
 # %% [markdown]
 # ## 2. Pré-processamento
