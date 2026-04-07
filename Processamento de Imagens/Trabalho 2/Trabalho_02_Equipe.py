@@ -1,6 +1,6 @@
 # # UNIVERSIDADE REGIONAL DE BLUMENAU - FURB
 # **DISCIPLINA**: Processamento de Imagens  
-# **ALUNO/EQUIPE**: Gabriel
+# **ALUNO**: Gabriel Utyama
 
 
 # %%
