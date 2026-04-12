@@ -1,94 +1,170 @@
 # # UNIVERSIDADE REGIONAL DE BLUMENAU - FURB
-# **DISCIPLINA**: Processamento de Imagens  
+# **DISCIPLINA**: Processamento de Imagens
 # **ALUNO**: Gabriel Utyama
-
+#
+# Segmentação da pista (asfalto) na imagem de satélite do Autódromo de Interlagos
+# usando operadores morfológicos (chapéu-preto, limiarização, abertura/fechamento,
+# remoção de pequenos objetos) conforme o roteiro do trabalho prático.
 
 # %%
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from skimage import morphology
-from skimage.morphology import disk
+from pathlib import Path
 
-def show_img(title, img, cmap='gray'):
-    plt.figure(figsize=(8, 6))
+from skimage import morphology
+from skimage.morphology import disk, binary_closing, binary_opening
+from skimage.measure import label
+
+
+def imread_unicode(path: Path):
+    """Lê imagem com OpenCV mesmo quando o caminho contém acentos (Windows)."""
+    data = np.fromfile(str(path), dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"Não foi possível abrir: {path}")
+    return img
+
+
+def show_img(title, img, cmap=None):
+    plt.figure(figsize=(10, 8))
     plt.title(title)
-    plt.imshow(img, cmap=cmap)
-    plt.axis('off')
+    if cmap is not None:
+        plt.imshow(img, cmap=cmap)
+    else:
+        plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim == 3 else img, cmap="gray")
+    plt.axis("off")
     plt.show()
 
+
+def excess_green_mask_bgr(bgr: np.ndarray, thresh: float = 22.0) -> np.ndarray:
+    """
+    Índice Excess Green (2G - R - B): vegetação apresenta valores altos;
+    asfalto e áreas urbanas tendem a ficar abaixo do limiar.
+    Retorna máscara booleana True onde NÃO há vegetação forte (candidatos à pista).
+    """
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    exg = 2.0 * g - r - b
+    return exg < thresh
+
+
+def black_hat_disk(gray: np.ndarray, radius: int) -> np.ndarray:
+    """Chapéu-preto com elemento estruturante tipo disco (via elipse cheia)."""
+    k = 2 * radius + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    return cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+
+
+def largest_component(mask_bool: np.ndarray) -> np.ndarray:
+    """Mantém apenas o maior componente conexo (pista principal)."""
+    lab = label(mask_bool)
+    if lab.max() == 0:
+        return mask_bool
+    counts = np.bincount(lab.ravel())
+    counts[0] = 0
+    idx = counts.argmax()
+    return lab == idx
+
+
 # %% [markdown]
-# ## 1. Obtenção da Imagem
-# 
+# ## 1. Obtenção da imagem
+#
+# Imagem de satélite do Autódromo José Carlos Pace (Interlagos), São Paulo.
+
 # %%
-img_gray = np.ones((800, 800), dtype=np.uint8) * 200
-noise = np.random.normal(0, 15, (800, 800))
-img_gray = np.clip(img_gray + noise, 0, 255).astype(np.uint8)
+BASE = Path(__file__).resolve().parent
+IMAGE_PATH = BASE / "Satélite Autódromo.jpg"
 
-pts = np.array([[200, 200], [600, 200], [700, 400], [500, 600], [300, 600], [150, 400]], np.int32)
-pts = pts.reshape((-1, 1, 2))
-cv2.polylines(img_gray, [pts], isClosed=True, color=50, thickness=20)
+img_bgr = imread_unicode(IMAGE_PATH)
+img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-# Inserindo ruídos para justificar e demonstrar os algoritmos de limpeza:
-salt_pepper = np.random.rand(800, 800)
-# 1. Ruído "Salt" na pista (pontos claros criam buracos que a dilatação/erosão vão fechar)
-img_gray[(salt_pepper > 0.97) & (img_gray < 100)] = 200
-# 2. Ruído "Pepper" e falsas feições no fundo (o remove_small_objects vai limpar)
-img_gray[salt_pepper < 0.03] = 40
-for _ in range(80):
-    ix = np.random.randint(0, 800)
-    iy = np.random.randint(0, 800)
-    r = np.random.randint(1, 4)
-    cv2.circle(img_gray, (ix, iy), r, 40, -1)
+h, w = img_bgr.shape[:2]
+print(f"Resolução: {w}×{h}")
 
-img_rgb = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
-
-show_img("Imagem Original com Ruídos", img_gray)
+show_img("Imagem original (satélite)", img_bgr)
 
 # %% [markdown]
 # ## 2. Pré-processamento
-# 
+#
+# - Conversão para tons de cinza e leve suavização para reduzir ruído de sensor.
+# - **Chapéu-preto (black-hat)**: realça estruturas mais escuras que o entorno (asfalto).
+# - **CLAHE**: equalização adaptativa (melhor que `equalizeHist` global em cenas heterogêneas).
+
 # %%
-kernel_disk = disk(5)
-closeth = cv2.morphologyEx(img_gray, cv2.MORPH_BLACKHAT, kernel_disk)
+gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-histeq = cv2.equalizeHist(closeth)
-subm = histeq.copy()
+# Raio adaptativo ao tamanho da imagem (pistas largas em imagens grandes precisam de kernel maior)
+bh_radius = int(max(10, min(h, w) // 55))
+blackhat = black_hat_disk(gray, bh_radius)
 
-show_img("Após Pré-Processamento (Realce das Pistas)", subm)
+clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+enhanced = clahe.apply(blackhat)
+
+show_img(f"Após chapéu-preto (raio≈{bh_radius}) + CLAHE", enhanced, cmap="gray")
 
 # %% [markdown]
-# ## 3. Detecção e Pós-processamento
-# 
+# ## 3. Detecção e pós-processamento
+#
+# - Limiarização de Otsu na imagem realçada.
+# - Filtro espacial por **área mínima** (`remove_small_objects`) para descartar telhados e ruídos.
+# - **Fechamento morfológico** para unir falhas no asfalto (sombras, marcações).
+# - **Abertura** leve para cortar pontes finas para o entorno urbano.
+# - **Supressão de vegetação** (Excess Green) para reduzir manchas de grama.
+# - Opcional: **remoção de buracos** internos e seleção do **maior componente** (pista principal, excluindo kartódromo fino se desconexo).
+
 # %%
-_, thresh_img = cv2.threshold(subm, 200, 255, cv2.THRESH_BINARY)
+# Limiar de Otsu
+otsu_val, thresh_img = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 thresh_bool = thresh_img > 0
-areaclose1 = morphology.remove_small_objects(thresh_bool, min_size=500)
 
-kernel_cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-areaclose1_uint = areaclose1.astype(np.uint8) * 255
-dilated = cv2.dilate(areaclose1_uint, kernel_cross, iterations=2)
+# Área mínima proporcional à resolução (ajuste fino se necessário)
+min_cc_area = max(800, int(h * w * 0.00012))
+clean = morphology.remove_small_objects(thresh_bool, min_size=min_cc_area)
 
-eroded = cv2.erode(dilated, kernel_cross, iterations=1)
+# Fechamento + abertura (elemento em cruz, como no roteiro original — com mais iterações)
+cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+u8 = clean.astype(np.uint8) * 255
+u8 = cv2.morphologyEx(u8, cv2.MORPH_CLOSE, cross, iterations=3)
+u8 = cv2.morphologyEx(u8, cv2.MORPH_OPEN, cross, iterations=1)
+morph_bool = u8 > 0
 
-eroded_bool = eroded > 0
-final_bool = morphology.remove_small_objects(eroded_bool, min_size=300)
-final_feat = final_bool.astype(np.uint8) * 255
+# Reforço com operações em booleano (disco) para continuidade da pista
+se_close = disk(max(4, bh_radius // 2))
+morph_bool = binary_closing(morph_bool, se_close)
+se_open = disk(3)
+morph_bool = binary_opening(morph_bool, se_open)
 
-show_img("Feição Detectada (Máscara Pista)", final_feat)
+# Vegetação: restringe candidatos (asfalto não é verde)
+veg_ok = excess_green_mask_bgr(img_bgr, thresh=22.0)
+combined = morph_bool & veg_ok
+if not np.any(combined):
+    combined = morph_bool.copy()
+
+# Buracos pequenos dentro da máscara
+combined = morphology.remove_small_holes(combined, area_threshold=max(400, min_cc_area // 2))
+
+# Maior componente = circuito principal (evita kartódromo/auxiliares menores, se desconectados)
+TRACK_LARGEST_ONLY = True
+if TRACK_LARGEST_ONLY:
+    combined = largest_component(combined)
+
+final_feat = (combined.astype(np.uint8)) * 255
+
+print(f"Otsu ≈ {otsu_val:.1f} | min_cc_area={min_cc_area} | black-hat raio={bh_radius}")
+show_img("Máscara da pista (binária)", final_feat, cmap="gray")
 
 # %% [markdown]
-# ## 4. Resultado (Sobreposição)
-# 
+# ## 4. Resultado (sobreposição em vermelho)
+
 # %%
-overlay = img_rgb.copy()
-overlay[final_feat == 255] = [255, 0, 0]
+overlay = img_rgb.copy().astype(np.float32)
+overlay[combined] = [255, 0, 0]
+alpha = 0.55
+result_rgb = (alpha * overlay + (1.0 - alpha) * img_rgb.astype(np.float32)).astype(np.uint8)
 
-alpha = 0.6
-result = cv2.addWeighted(overlay, alpha, img_rgb, 1 - alpha, 0)
-
-plt.figure(figsize=(12, 10))
-plt.title("Sobreposição da pista detectada com a imagem original")
-plt.imshow(result)
-plt.axis('off')
+plt.figure(figsize=(14, 12))
+plt.title("Sobreposição da pista detectada (vermelho)")
+plt.imshow(result_rgb)
+plt.axis("off")
 plt.show()
