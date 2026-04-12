@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 from skimage import morphology
-from skimage.morphology import disk, binary_closing, binary_opening
-from skimage.measure import label
+from skimage.morphology import disk
+from skimage.morphology.binary import binary_closing, binary_opening
 
 
 def imread_unicode(path: Path):
@@ -57,13 +57,15 @@ def black_hat_disk(gray: np.ndarray, radius: int) -> np.ndarray:
 
 def largest_component(mask_bool: np.ndarray) -> np.ndarray:
     """Mantém apenas o maior componente conexo (pista principal)."""
-    lab = label(mask_bool)
-    if lab.max() == 0:
+    if not np.any(mask_bool):
         return mask_bool
-    counts = np.bincount(lab.ravel())
-    counts[0] = 0
-    idx = counts.argmax()
-    return lab == idx
+    mask_u8 = mask_bool.astype(np.uint8) * 255
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if n <= 1:
+        return mask_bool
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    best = 1 + int(np.argmax(areas))
+    return labels == best
 
 
 # %% [markdown]
